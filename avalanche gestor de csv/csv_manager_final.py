@@ -10,6 +10,7 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from ttkbootstrap.style import ThemeDefinition
 import sys
+import traceback
 
 # Función para obtener la ruta base de la aplicación
 def get_application_path():
@@ -190,7 +191,7 @@ class DatabaseManager:
         if self.conn:
             self.conn.close()
     
-    def add_client(self, name, email, client_code="", address="", postal_code="", town="", city="", imported_date=None):
+    def add_client(self, name, email, client_code="", address="", postal_code="", town="", city="", additional_info="", imported_date=None):
         """Añade un nuevo cliente a la base de datos."""
         if not self.conn:
             self.create_database()
@@ -207,10 +208,11 @@ class DatabaseManager:
         postal_code = (postal_code or "").strip()
         town = (town or "").strip()
         city = (city or "").strip()
+        additional_info = (additional_info or "").strip()
         
         # Comprobar si el email ya existe
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id, name, client_code, address, postal_code, town, city FROM clients WHERE email = ?", (email,))
+        cursor.execute("SELECT id, name, client_code, address, postal_code, town, city, additional_info FROM clients WHERE email = ?", (email,))
         existing_client = cursor.fetchone()
         
         try:
@@ -224,6 +226,7 @@ class DatabaseManager:
                 existing_postal_code = (existing_client[4] or "").strip()
                 existing_town = (existing_client[5] or "").strip()
                 existing_city = (existing_client[6] or "").strip()
+                existing_additional_info = (existing_client[7] or "").strip() if len(existing_client) > 7 else ""
                 
                 # Función para normalizar aún más los valores para comparación (elimina espacios múltiples, etc.)
                 def normalize_deeper(value):
@@ -281,11 +284,17 @@ class DatabaseManager:
                     self.debug_comparison("ciudad", existing_city, city, existing_city_norm, city_norm)
                     changes.append(f"ciudad: '{existing_city}' -> '{city}'")
                 
+                additional_info_norm = normalize_deeper(additional_info)
+                existing_additional_info_norm = normalize_deeper(existing_additional_info)
+                if additional_info_norm != existing_additional_info_norm:
+                    self.debug_comparison("información adicional", existing_additional_info, additional_info, existing_additional_info_norm, additional_info_norm)
+                    changes.append(f"información adicional: '{existing_additional_info}' -> '{additional_info}'")
+                
                 if changes:
                     # Hay cambios, actualizar el cliente
                     cursor.execute(
-                        "UPDATE clients SET name = ?, client_code = ?, address = ?, postal_code = ?, town = ?, city = ? WHERE id = ?",
-                        (name, client_code, address, postal_code, town, city, client_id)
+                        "UPDATE clients SET name = ?, client_code = ?, address = ?, postal_code = ?, town = ?, city = ?, additional_info = ? WHERE id = ?",
+                        (name, client_code, address, postal_code, town, city, additional_info, client_id)
                     )
                     self.conn.commit()
                     return {"updated": True, "changes": changes}  # Retornar que fue actualizado con los cambios
@@ -295,8 +304,8 @@ class DatabaseManager:
             else:
                 # Nuevo cliente, insertarlo
                 cursor.execute(
-                    "INSERT INTO clients (name, email, imported_date, client_code, address, postal_code, town, city) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (name, email, imported_date, client_code, address, postal_code, town, city)
+                    "INSERT INTO clients (name, email, imported_date, client_code, address, postal_code, town, city, additional_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (name, email, imported_date, client_code, address, postal_code, town, city, additional_info)
                 )
                 self.conn.commit()
                 return {"new": True}  # Retornar que es nuevo
@@ -311,18 +320,56 @@ class DatabaseManager:
     def add_commercial_contact(self, name, email, company="", client_code="", address="", postal_code="", town="", city="", additional_info=""):
         """Añade un contacto comercial a la base de datos."""
         try:
+            if not self.conn:
+                self.create_database()
+                
+            # Normalizar valores para evitar problemas
+            name = str(name).strip() if name else ""
+            email = str(email).strip().lower() if email else ""
+            company = str(company).strip() if company else ""
+            client_code = str(client_code).strip() if client_code else ""
+            address = str(address).strip() if address else ""
+            postal_code = str(postal_code).strip() if postal_code else ""
+            town = str(town).strip() if town else ""
+            city = str(city).strip() if city else ""
+            additional_info = str(additional_info).strip() if additional_info else ""
+            
             cursor = self.conn.cursor()
             imported_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute(
-                "INSERT OR IGNORE INTO commercial_contacts (name, email, imported_date, company, client_code, address, postal_code, town, city, additional_info) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, email, imported_date, company, client_code, address, postal_code, town, city, additional_info)
-            )
-            self.conn.commit()
-            return cursor.rowcount > 0
-        except sqlite3.Error as e:
-            print(f"Error al añadir contacto comercial: {e}")
-            return False
             
+            # Verificar si necesitamos actualizar en lugar de insertar
+            cursor.execute("SELECT COUNT(*) FROM commercial_contacts WHERE email = ?", (email,))
+            count = cursor.fetchone()[0]
+            
+            if count > 0:
+                # Actualizar contacto existente
+                cursor.execute(
+                    """UPDATE commercial_contacts 
+                       SET name = ?, company = ?, client_code = ?, address = ?, 
+                           postal_code = ?, town = ?, city = ?, additional_info = ? 
+                       WHERE email = ?""",
+                    (name, company, client_code, address, postal_code, town, city, additional_info, email)
+                )
+                self.conn.commit()
+                return {"updated": True}
+            else:
+                # Insertar nuevo contacto
+                cursor.execute(
+                    """INSERT INTO commercial_contacts 
+                       (name, email, imported_date, company, client_code, address, postal_code, town, city, additional_info) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, email, imported_date, company, client_code, address, postal_code, town, city, additional_info)
+                )
+                self.conn.commit()
+                return {"new": True}
+                
+        except sqlite3.IntegrityError as e:
+            print(f"Error de integridad al añadir contacto comercial: {e}")
+            return {"error": str(e)}
+        except Exception as e:
+            print(f"Error al añadir contacto comercial: {e}")
+            return {"error": str(e)}
+    
     def add_commercial_contact_with_changes(self, name, email, company="", client_code="", address="", postal_code="", town="", city="", additional_info="", imported_date=None):
         """Añade o actualiza un contacto comercial y detecta cambios."""
         if not self.conn:
@@ -343,7 +390,7 @@ class DatabaseManager:
         city = (city or "").strip()
         additional_info = (additional_info or "").strip()
         
-        # Comprobar si el email ya existe
+        # Comprobar si el email ya existe en la tabla de contactos comerciales
         cursor = self.conn.cursor()
         cursor.execute("SELECT id, name, company, client_code, address, postal_code, town, city, additional_info FROM commercial_contacts WHERE email = ?", (email,))
         existing_contact = cursor.fetchone()
@@ -362,48 +409,41 @@ class DatabaseManager:
                 existing_city = (existing_contact[7] or "").strip()
                 existing_additional_info = (existing_contact[8] or "").strip()
                 
-                # Función para normalizar aún más los valores para comparación (elimina espacios múltiples, etc.)
+                # Función para normalizar aún más los valores para comparación
                 def normalize_deeper(value):
                     if value is None:
                         return ""
-                    # Convertir a string si no lo es
                     value = str(value).strip()
-                    # Eliminar caracteres especiales que puedan interferir en la comparación
                     value = value.replace('*', '').replace('\t', ' ').replace('\r', '').replace('\n', ' ')
-                    # Eliminar espacios múltiples y normalizar
                     return ' '.join(value.split())
                 
                 # Aplicar normalización más profunda a todos los valores
                 name_norm = normalize_deeper(name)
                 existing_name_norm = normalize_deeper(existing_name)
-                
                 company_norm = normalize_deeper(company)
                 existing_company_norm = normalize_deeper(existing_company)
-                
                 client_code_norm = normalize_deeper(client_code)
                 existing_client_code_norm = normalize_deeper(existing_client_code)
-                
                 address_norm = normalize_deeper(address)
                 existing_address_norm = normalize_deeper(existing_address)
-                
                 postal_code_norm = normalize_deeper(postal_code)
                 existing_postal_code_norm = normalize_deeper(existing_postal_code)
-                
                 town_norm = normalize_deeper(town)
                 existing_town_norm = normalize_deeper(existing_town)
-                
                 city_norm = normalize_deeper(city)
                 existing_city_norm = normalize_deeper(existing_city)
-                
                 additional_info_norm = normalize_deeper(additional_info)
                 existing_additional_info_norm = normalize_deeper(existing_additional_info)
                 
-                # Verificar si algún campo ha cambiado (usando valores normalizados para la comparación)
+                # Verificar si algún campo ha cambiado (usando valores normalizados)
                 changes = []
-                if name_norm != existing_name_norm:
+                
+                # Verificar cambios en el nombre (ignorando diferencias solo de mayúsculas/minúsculas)
+                if name_norm.lower() != existing_name_norm.lower():
                     self.debug_comparison("nombre", existing_name, name, existing_name_norm, name_norm)
                     changes.append(f"nombre: '{existing_name}' -> '{name}'")
                 
+                # Verificar cambios en otros campos
                 if company_norm != existing_company_norm:
                     self.debug_comparison("empresa", existing_company, company, existing_company_norm, company_norm)
                     changes.append(f"empresa: '{existing_company}' -> '{company}'")
@@ -428,34 +468,25 @@ class DatabaseManager:
                     self.debug_comparison("ciudad", existing_city, city, existing_city_norm, city_norm)
                     changes.append(f"ciudad: '{existing_city}' -> '{city}'")
                 
+                additional_info_norm = normalize_deeper(additional_info)
+                existing_additional_info_norm = normalize_deeper(existing_additional_info)
                 if additional_info_norm != existing_additional_info_norm:
                     self.debug_comparison("información adicional", existing_additional_info, additional_info, existing_additional_info_norm, additional_info_norm)
                     changes.append(f"información adicional: '{existing_additional_info}' -> '{additional_info}'")
                 
                 if changes:
-                    # Hay cambios, actualizar el contacto
+                    # Solo actualizar si hay cambios reales
                     cursor.execute(
                         """UPDATE commercial_contacts 
                            SET name = ?, company = ?, client_code = ?, address = ?, 
                                postal_code = ?, town = ?, city = ?, additional_info = ? 
                            WHERE id = ?""",
-                        (
-                            name,
-                            company,
-                            client_code,
-                            address,
-                            postal_code,
-                            town,
-                            city,
-                            additional_info,
-                            contact_id
-                        )
+                        (name, company, client_code, address, postal_code, town, city, additional_info, contact_id)
                     )
                     self.conn.commit()
-                    return {"updated": True, "changes": changes}  # Retornar que fue actualizado con los cambios
+                    return {"updated": True, "changes": changes}
                 else:
-                    # No hay cambios, no hacer nada
-                    return {"updated": False, "changes": []}  # Retornar que no hubo cambios
+                    return {"updated": False, "changes": []}
             else:
                 # Nuevo contacto, insertarlo
                 cursor.execute(
@@ -465,7 +496,7 @@ class DatabaseManager:
                     (name, email, imported_date, company, client_code, address, postal_code, town, city, additional_info)
                 )
                 self.conn.commit()
-                return {"new": True}  # Retornar que es nuevo
+                return {"new": True}
                 
         except sqlite3.IntegrityError as e:
             print(f"Error de integridad al añadir contacto comercial: {e}")
@@ -687,6 +718,8 @@ class CSVManagerApp:
         self.new_contacts = []
         # Variable para controlar si se omiten todos los duplicados
         self.skip_all_duplicates = False
+        # Lista para almacenar los contactos modificados y sus campos afectados
+        self.modified_contacts = {}
         
         self.setup_ui()
     
@@ -1031,6 +1064,8 @@ class CSVManagerApp:
         
         # Configurar el color verde para los nuevos contactos
         self.clients_tree.tag_configure('new_contact', background='#c8ffb3')
+        # Configurar el color verde para las celdas modificadas
+        self.clients_tree.tag_configure('modified_cell', background='#a5e88f')
     
     def setup_commercial_treeview(self):
         """Configura el treeview para contactos comerciales."""
@@ -1084,6 +1119,8 @@ class CSVManagerApp:
         
         # Configurar el color verde para los nuevos contactos
         self.commercial_tree.tag_configure('new_contact', background='#c8ffb3')
+        # Configurar el color verde para las celdas modificadas
+        self.commercial_tree.tag_configure('modified_cell', background='#a5e88f')
     
     def setup_invalid_treeview(self):
         """Configura el treeview para emails no válidos."""
@@ -1150,7 +1187,15 @@ class CSVManagerApp:
         
         # Mostrar clientes regulares
         for client in regular_clients:
-            self.clients_tree.insert("", tk.END, values=client)
+            email = client[1]  # El email está en la posición 1
+            
+            # Comprobar si el cliente está en la lista de contactos modificados
+            if email in self.modified_contacts:
+                # Si está modificado, insertar con la etiqueta de modificado
+                item_id = self.clients_tree.insert("", tk.END, values=client, tags=('modified_cell',))
+            else:
+                # Si no está modificado, insertar normalmente
+                item_id = self.clients_tree.insert("", tk.END, values=client)
         
         # Mostrar clientes nuevos al final con tag especial
         for client in new_clients:
@@ -1175,7 +1220,15 @@ class CSVManagerApp:
         
         # Mostrar contactos comerciales regulares
         for commercial in regular_commercials:
-            self.commercial_tree.insert("", tk.END, values=commercial)
+            email = commercial[1]  # El email está en la posición 1
+            
+            # Comprobar si el contacto comercial está en la lista de contactos modificados
+            if email in self.modified_contacts:
+                # Si está modificado, insertar con la etiqueta de modificado
+                item_id = self.commercial_tree.insert("", tk.END, values=commercial, tags=('modified_cell',))
+            else:
+                # Si no está modificado, insertar normalmente
+                item_id = self.commercial_tree.insert("", tk.END, values=commercial)
         
         # Mostrar contactos comerciales nuevos al final con tag especial
         for commercial in new_commercials:
@@ -1434,7 +1487,12 @@ class CSVManagerApp:
             
             with open(filepath, 'r', encoding=encoding) as csv_file:
                 csv_reader = csv.reader(csv_file, delimiter=';')
-                next(csv_reader, None)  # Saltar encabezados
+                # Eliminar la siguiente línea para no saltar encabezados
+                # next(csv_reader, None)  # Saltar encabezados
+                
+                # Contadores para depuración
+                skipped_insufficient_columns = 0
+                skipped_empty_email = 0
                 
                 for row in csv_reader:
                     # Verificar que la fila tenga suficientes columnas
@@ -1446,11 +1504,19 @@ class CSVManagerApp:
                                        city_index if city_index > 0 else 0)
                     
                     if len(row) <= max_required_idx:
+                        skipped_insufficient_columns += 1
+                        if self.db_manager.debug_mode:
+                            print(f"DEBUG: Saltando fila con columnas insuficientes. Tiene {len(row)} columnas, se necesitan {max_required_idx+1}.")
+                            if len(row) > 0:
+                                print(f"Contenido de la fila: {row}")
                         continue  # Saltar filas que no tienen suficientes columnas
                     
                     email = row[email_index].strip().lower() if email_index < len(row) else ""
                     
                     if not email:
+                        skipped_empty_email += 1
+                        if self.db_manager.debug_mode:
+                            print(f"DEBUG: Saltando fila sin email. Contenido: {row}")
                         continue  # Saltar filas sin email
                     
                     # Guardar los datos de esta fila organizados por email
@@ -1515,6 +1581,27 @@ class CSVManagerApp:
                                         "email": email,
                                         "changes": result["changes"]
                                     })
+                                    
+                                    # Guardar los campos modificados para colorearlos después
+                                    modified_fields = []
+                                    for change in result["changes"]:
+                                        parts = change.split(": ")
+                                        if len(parts) >= 2:
+                                            field_name = parts[0]
+                                            # Mapear los nombres de campo en español a los nombres de columna en inglés
+                                            field_mapping = {
+                                                "nombre": "name",
+                                                "código cliente": "client_code",
+                                                "dirección": "address",
+                                                "código postal": "postal_code",
+                                                "población": "town",
+                                                "ciudad": "city"
+                                            }
+                                            if field_name in field_mapping:
+                                                modified_fields.append(field_mapping[field_name])
+                                    
+                                    # Guardar en el diccionario de contactos modificados
+                                    self.modified_contacts[email] = modified_fields
                                 else:
                                     # Si el usuario rechaza, revertir los cambios en la base de datos
                                     cursor = self.db_manager.conn.cursor()
@@ -1563,96 +1650,90 @@ class CSVManagerApp:
                             pass
                         elif "updated" in result:
                             if result["updated"] and result["changes"]:
-                                # Preguntar al usuario si desea aplicar los cambios
-                                changes_message = f"Se han detectado cambios en el contacto comercial {name} <{email}>:\n\n"
+                                # Filtrar solo los cambios reales en los datos
+                                real_changes = []
                                 for change in result["changes"]:
-                                    changes_message += f"• {change}\n"
-                                changes_message += "\n¿Desea aplicar estos cambios?"
+                                    # Ignorar cambios de categoría
+                                    if not any(cat in change.lower() for cat in ["categoría", "category"]):
+                                        real_changes.append(change)
                                 
-                                # Añadir opción para activar depuración si hay muchos cambios
-                                if len(result["changes"]) > 3:
-                                    changes_message += "\n\nNota: Si cree que estos cambios no son correctos, puede activar el modo de depuración en la parte inferior derecha de la ventana para obtener más información."
+                                # Verificar si el contacto acaba de ser reclasificado recientemente
+                                cursor = self.db_manager.conn.cursor()
                                 
-                                if messagebox.askyesno("Cambios detectados", changes_message):
-                                    # Si el usuario acepta, actualizar el contador
-                                    updated_clients += 1
-                                    # Guardar los detalles de los cambios
-                                    clients_with_changes.append({
-                                        "name": name,
-                                        "email": email,
-                                        "changes": result["changes"]
-                                    })
+                                # Solo considerar como "recién movido" si fue añadido hace menos de 10 minutos
+                                # Lo que generalmente indica que fue parte de la misma operación
+                                cursor.execute("SELECT imported_date FROM commercial_contacts WHERE email = ?", (email,))
+                                commercial_date = cursor.fetchone()
+                                contact_just_moved = False
+                                
+                                if commercial_date:
+                                    last_date = commercial_date[0]
+                                    now = datetime.now()
+                                    
+                                    if isinstance(last_date, str):
+                                        try:
+                                            last_date = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
+                                            # Si fue agregado en los últimos 10 minutos, probablemente es 
+                                            # parte de la misma operación de reclasificación
+                                            if (now - last_date).total_seconds() < 600:  # 10 minutos
+                                                # Buscar si existía antes en otra tabla (cliente)
+                                                cursor.execute("SELECT COUNT(*) FROM clients WHERE email = ?", (email,))
+                                                client_count = cursor.fetchone()[0]
+                                                if client_count > 0:
+                                                    # Si existe en ambas tablas, es una reclasificación en progreso
+                                                    contact_just_moved = True
+                                        except ValueError:
+                                            pass
+                                
+                                # Si hay cambios importantes en el contacto (no solo cambio de categoría)
+                                if real_changes:
+                                    # Preguntar al usuario si desea aplicar los cambios
+                                    changes_message = f"Se han detectado cambios en el contacto comercial {name} <{email}>:\n\n"
+                                    for change in real_changes:
+                                        changes_message += f"• {change}\n"
+                                    changes_message += "\n¿Desea aplicar estos cambios?"
+                                    
+                                    # Añadir opción para activar depuración si hay muchos cambios
+                                    if len(real_changes) > 3:
+                                        changes_message += "\n\nNota: Si cree que estos cambios no son correctos, puede activar el modo de depuración en la parte inferior derecha de la ventana para obtener más información."
+                                    
+                                    if messagebox.askyesno("Cambios detectados", changes_message):
+                                        # Si el usuario acepta, actualizar el contador
+                                        updated_clients += 1
+                                        # Guardar los detalles de los cambios
+                                        clients_with_changes.append({
+                                            "name": name,
+                                            "email": email,
+                                            "changes": real_changes
+                                        })
+                                        
+                                        # Guardar los campos modificados para colorearlos después
+                                        modified_fields = []
+                                        for change in real_changes:
+                                            parts = change.split(": ")
+                                            if len(parts) >= 2:
+                                                field_name = parts[0]
+                                                # Mapear los nombres de campo en español a los nombres de columna en inglés
+                                                field_mapping = {
+                                                    "nombre": "name",
+                                                    "empresa": "company",
+                                                    "código cliente": "client_code",
+                                                    "dirección": "address",
+                                                    "código postal": "postal_code",
+                                                    "población": "town",
+                                                    "ciudad": "city",
+                                                    "información adicional": "additional_info"
+                                                }
+                                                if field_name in field_mapping:
+                                                    modified_fields.append(field_mapping[field_name])
+                                        
+                                        # Guardar en el diccionario de contactos modificados
+                                        self.modified_contacts[email] = modified_fields
                                 else:
-                                    # Si el usuario rechaza, revertir los cambios en la base de datos
-                                    cursor = self.db_manager.conn.cursor()
-                                    cursor.execute("SELECT id FROM commercial_contacts WHERE email = ?", (email,))
-                                    contact_id = cursor.fetchone()[0]
-                                    
-                                    # Buscar los valores originales
-                                    for change in result["changes"]:
-                                        parts = change.split(": ")
-                                        if len(parts) >= 2:
-                                            field = parts[0]
-                                            values_part = parts[1]
-                                            value_parts = values_part.split(" -> ")
-                                            if len(value_parts) >= 1:
-                                                original = value_parts[0].strip("'")
-                                                originals = {}
-                                                for change in result["changes"]:
-                                                    parts = change.split(": ")
-                                                    if len(parts) >= 2:
-                                                        field = parts[0]
-                                                        values_part = parts[1]
-                                                        value_parts = values_part.split(" -> ")
-                                                        if len(value_parts) >= 1:
-                                                            original = value_parts[0].strip("'")
-                                                            originals[field] = original
-                                    
-                                    # Obtener valores actuales para campos que no cambiaron
-                                    cursor.execute(
-                                        "SELECT name, company, client_code, address, postal_code, town, city, additional_info FROM commercial_contacts WHERE id = ?", 
-                                        (contact_id,)
-                                    )
-                                    current = cursor.fetchone()
-                                    
-                                    # Preparar los valores para la actualización
-                                    update_values = {
-                                        "nombre": current[0],
-                                        "empresa": current[1],
-                                        "código cliente": current[2],
-                                        "dirección": current[3],
-                                        "código postal": current[4],
-                                        "población": current[5],
-                                        "ciudad": current[6],
-                                        "información adicional": current[7]
-                                    }
-                                    
-                                    # Sobreescribir con los valores originales para campos que cambiaron
-                                    for field, value in originals.items():
-                                        update_values[field] = value
-                                    
-                                    # Actualizar con los valores originales
-                                    cursor.execute(
-                                        """UPDATE commercial_contacts SET 
-                                           name = ?, company = ?, client_code = ?, address = ?, 
-                                           postal_code = ?, town = ?, city = ?, additional_info = ? 
-                                           WHERE id = ?""",
-                                        (
-                                            update_values["nombre"],
-                                            update_values["empresa"],
-                                            update_values["código cliente"],
-                                            update_values["dirección"],
-                                            update_values["código postal"],
-                                            update_values["población"],
-                                            update_values["ciudad"],
-                                            update_values["información adicional"],
-                                            contact_id
-                                        )
-                                    )
-                                    self.db_manager.conn.commit()
+                                    # No hay cambios reales en los datos
                                     unchanged_clients += 1
                             else:
-                                # Si no hay cambios, incrementar el contador de sin cambios
+                                # No hay cambios según la BD
                                 unchanged_clients += 1
                         elif "error" in result:
                             print(f"Error al procesar contacto comercial {name}, {email}: {result['error']}")
@@ -1697,6 +1778,16 @@ class CSVManagerApp:
                               f"Se han actualizado {updated_clients} clientes existentes.\n"\
                               f"Se han omitido {unchanged_clients} clientes sin cambios.\n"\
                               f"Se han omitido {duplicate_contacts} contactos duplicados."
+            
+            # Añadir información de depuración sobre filas saltadas
+            if self.db_manager.debug_mode:
+                total_rows = skipped_insufficient_columns + skipped_empty_email + len(csv_data)
+                detailed_message += f"\n\nInformación de depuración:\n"\
+                                   f"- Total de filas en CSV: {total_rows}\n"\
+                                   f"- Filas procesadas correctamente: {len(csv_data)}\n"\
+                                   f"- Filas saltadas por columnas insuficientes: {skipped_insufficient_columns}\n"\
+                                   f"- Filas saltadas por email vacío: {skipped_empty_email}\n"\
+                                   f"- Duplicados (mismo email): {total_rows - skipped_insufficient_columns - skipped_empty_email - len(csv_data)}"
             
             # Si hay clientes actualizados, mostrar los detalles de los cambios
             if updated_clients > 0 and clients_with_changes:
@@ -1754,10 +1845,6 @@ class CSVManagerApp:
                         
                         # Centrar la ventana relativa a la ventana principal
                         self.center_window(details_window)
-                        
-                    else:
-                        # Si no quiere ver los detalles, mostrar solo el resumen
-                        messagebox.showinfo("Importación Completada", detailed_message)
                 else:
                     # Si el mensaje no es muy largo, mostrar todo junto
                     messagebox.showinfo(
@@ -1767,10 +1854,18 @@ class CSVManagerApp:
             else:
                 # Si no hay cambios, mostrar solo el mensaje básico
                 messagebox.showinfo("Importación Completada", detailed_message)
+            
+            # Limpiar variables que controlan la importación para próximos usos
+            self.skip_all_duplicates = False
+            
+            # No limpiamos self.new_contacts para que se muestren resaltados hasta la próxima importación
+            # En cambio, limpiamos los contactos modificados ya que esos sí tienen el efecto permanente en la BD
+            # y ya han sido vistos en el informe que se acaba de mostrar
+            self.modified_contacts = {}
         
         except Exception as e:
             messagebox.showerror("Error", f"Error al importar el archivo: {str(e)}")
-        
+            
         finally:
             # Cerrar la ventana de progreso SIEMPRE, incluso si hay excepciones
             if 'progress_window' in locals() and progress_window and progress_window.winfo_exists():
@@ -2166,15 +2261,35 @@ class CSVManagerApp:
             if selected_items:
                 for item in selected_items:
                     values = self.clients_tree.item(item, 'values')
-                    contacts_to_reclassify.append({"name": values[0], "email": values[1]})
+                    # Capturar todos los campos del cliente
+                    contacts_to_reclassify.append({
+                        "name": values[0],
+                        "email": values[1],
+                        "client_code": values[3] if len(values) > 3 else "",
+                        "address": values[4] if len(values) > 4 else "",
+                        "postal_code": values[5] if len(values) > 5 else "",
+                        "town": values[6] if len(values) > 6 else "",
+                        "city": values[7] if len(values) > 7 else "",
+                        "additional_info": values[8] if len(values) > 8 else "",
+                    })
                 contact_type = "cliente"
         elif current_tab == 1:  # Pestaña de contactos comerciales
             selected_items = self.commercial_tree.selection()
             if selected_items:
                 for item in selected_items:
                     values = self.commercial_tree.item(item, 'values')
-                    # Para contactos comerciales, también guardamos la empresa
-                    contacts_to_reclassify.append({"name": values[0], "email": values[1], "company": values[2]})
+                    # Capturar todos los campos del contacto comercial
+                    contacts_to_reclassify.append({
+                        "name": values[0],
+                        "email": values[1],
+                        "company": values[2] if len(values) > 2 else "",
+                        "client_code": values[4] if len(values) > 4 else "",
+                        "address": values[5] if len(values) > 5 else "",
+                        "postal_code": values[6] if len(values) > 6 else "",
+                        "town": values[7] if len(values) > 7 else "",
+                        "city": values[8] if len(values) > 8 else "",
+                        "additional_info": values[9] if len(values) > 9 else "",
+                    })
                 contact_type = "contacto comercial"
         elif current_tab == 2:  # Pestaña de emails no válidos
             selected_items = self.invalid_tree.selection()
@@ -2280,34 +2395,112 @@ class CSVManagerApp:
     def _process_reclassification(self, current_type, contact, new_category_index, provided_reason=None):
         """Procesa la reclasificación de un contacto a una nueva categoría."""
         try:
+            # Recuperar todos los campos del contacto
             name = contact.get("name", "")
             email = contact.get("email", "")
             company = contact.get("company", "")
+            client_code = contact.get("client_code", "")
+            address = contact.get("address", "")
+            postal_code = contact.get("postal_code", "")
+            town = contact.get("town", "")
+            city = contact.get("city", "")
+            additional_info = contact.get("additional_info", "")
+            
+            # Verificar que los valores no sean None
+            name = str(name) if name is not None else ""
+            email = str(email) if email is not None else ""
+            company = str(company) if company is not None else ""
+            client_code = str(client_code) if client_code is not None else ""
+            address = str(address) if address is not None else ""
+            postal_code = str(postal_code) if postal_code is not None else ""
+            town = str(town) if town is not None else ""
+            city = str(city) if city is not None else ""
+            additional_info = str(additional_info) if additional_info is not None else ""
+            
+            # Depuración
+            print(f"DEBUG - Reclasificando contacto: {email}")
+            print(f"DEBUG - Tipo original: {current_type}")
+            print(f"DEBUG - Nuevo tipo: {new_category_index}")
+            print(f"DEBUG - Datos: nombre={name}, email={email}, empresa={company}")
+            print(f"DEBUG - Datos adicionales: código={client_code}, dirección={address}, CP={postal_code}")
+            print(f"DEBUG - Más datos: población={town}, ciudad={city}, info adicional={additional_info}")
+            
+            # Crear una conexión a la base de datos si no existe
+            if not self.db_manager.conn:
+                self.db_manager.create_database()
             
             cursor = self.db_manager.conn.cursor()
             
             # Eliminar de la categoría actual
-            if current_type == "cliente":
-                cursor.execute("DELETE FROM clients WHERE email=?", (email,))
-            elif current_type == "contacto comercial":
-                cursor.execute("DELETE FROM commercial_contacts WHERE email=?", (email,))
-            elif current_type == "email no válido":
-                cursor.execute("DELETE FROM invalid_emails WHERE email=?", (email,))
+            try:
+                if current_type == "cliente":
+                    cursor.execute("DELETE FROM clients WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de clientes: {email}")
+                elif current_type == "contacto comercial":
+                    cursor.execute("DELETE FROM commercial_contacts WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de contactos comerciales: {email}")
+                elif current_type == "email no válido":
+                    cursor.execute("DELETE FROM invalid_emails WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de emails no válidos: {email}")
+            except Exception as delete_error:
+                print(f"ERROR en eliminación: {str(delete_error)}")
             
             # Insertar en la nueva categoría
             if new_category_index == 0:  # Cliente
-                self.db_manager.add_client(name, email)
+                try:
+                    result = self.db_manager.add_client(
+                        name=name, 
+                        email=email, 
+                        client_code=client_code, 
+                        address=address, 
+                        postal_code=postal_code, 
+                        town=town, 
+                        city=city,
+                        additional_info=additional_info
+                    )
+                    print(f"DEBUG - Resultado add_client: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_client: {str(add_error)}")
+                    raise
             elif new_category_index == 1:  # Contacto comercial
-                self.db_manager.add_commercial_contact(name, email, company)
+                try:
+                    result = self.db_manager.add_commercial_contact(
+                        name=name, 
+                        email=email, 
+                        company=company, 
+                        client_code=client_code, 
+                        address=address, 
+                        postal_code=postal_code, 
+                        town=town, 
+                        city=city, 
+                        additional_info=additional_info
+                    )
+                    print(f"DEBUG - Resultado add_commercial_contact: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_commercial_contact: {str(add_error)}")
+                    raise
             elif new_category_index == 2:  # Email no válido
                 reason = provided_reason or "Marcado manualmente como inválido"
-                self.db_manager.add_invalid_email(email, name, reason)
+                try:
+                    result = self.db_manager.add_invalid_email(email, name, reason)
+                    print(f"DEBUG - Resultado add_invalid_email: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_invalid_email: {str(add_error)}")
+                    raise
                 
-            self.db_manager.conn.commit()
+            # Confirmar los cambios
+            try:
+                self.db_manager.conn.commit()
+                print(f"DEBUG - Cambios confirmados en la base de datos")
+            except Exception as commit_error:
+                print(f"ERROR en commit: {str(commit_error)}")
+                raise
+                
             return True
             
         except Exception as e:
-            print(f"Error al reclasificar el contacto {email}: {str(e)}")
+            print(f"ERROR CRÍTICO al reclasificar el contacto {email}: {str(e)}")
+            traceback.print_exc()  # Esto imprimirá el traceback completo
             return False
     
     def center_window(self, window):
@@ -2346,10 +2539,24 @@ class CSVManagerApp:
             return
         
         try:
-            with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                # Usar punto y coma como delimitador para mejor compatibilidad con Excel español
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(headers)
-                writer.writerows(data)
+                
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_data = []
+                for row in data:
+                    # Si la fila tiene menos columnas que los encabezados, añadir columnas vacías
+                    row_list = list(row)
+                    while len(row_list) < len(headers):
+                        row_list.append("")
+                    # Si la fila tiene más columnas que los encabezados, truncar
+                    if len(row_list) > len(headers):
+                        row_list = row_list[:len(headers)]
+                    formatted_data.append(row_list)
+                
+                writer.writerows(formatted_data)
             
             messagebox.showinfo(
                 "Exportación completada",
@@ -2367,32 +2574,67 @@ class CSVManagerApp:
             return
         
         try:
+            # Definir headers para cada categoría
+            client_headers = ["Nombre", "Email", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"]
+            commercial_headers = ["Nombre", "Email", "Empresa", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"]
+            invalid_headers = ["Email", "Nombre", "Fecha Importación", "Motivo"]
+            
             # Exportar clientes
             clients_path = os.path.join(export_dir, "clientes.csv")
-            with open(clients_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Nombre", "Email", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"])
+            with open(clients_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(client_headers)
                 
                 clients = self.db_manager.get_all_clients()
-                writer.writerows(clients)
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_clients = []
+                for row in clients:
+                    row_list = list(row)
+                    while len(row_list) < len(client_headers):
+                        row_list.append("")
+                    if len(row_list) > len(client_headers):
+                        row_list = row_list[:len(client_headers)]
+                    formatted_clients.append(row_list)
+                
+                writer.writerows(formatted_clients)
             
             # Exportar contactos comerciales
             commercial_path = os.path.join(export_dir, "contactos_comerciales.csv")
-            with open(commercial_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)  # Corregido: era writer = csv.writer.f)
-                writer.writerow(["Nombre", "Email", "Empresa", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"])
+            with open(commercial_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(commercial_headers)
                 
                 commercial_contacts = self.db_manager.get_all_commercial_contacts()
-                writer.writerows(commercial_contacts)
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_commercial = []
+                for row in commercial_contacts:
+                    row_list = list(row)
+                    while len(row_list) < len(commercial_headers):
+                        row_list.append("")
+                    if len(row_list) > len(commercial_headers):
+                        row_list = row_list[:len(commercial_headers)]
+                    formatted_commercial.append(row_list)
+                
+                writer.writerows(formatted_commercial)
             
             # Exportar emails no válidos
             invalid_path = os.path.join(export_dir, "emails_no_validos.csv")
-            with open(invalid_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Email", "Nombre", "Fecha Importación", "Motivo"])
+            with open(invalid_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(invalid_headers)
                 
                 invalid_emails = self.db_manager.get_all_invalid_emails()
-                writer.writerows(invalid_emails)
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_invalid = []
+                for row in invalid_emails:
+                    row_list = list(row)
+                    while len(row_list) < len(invalid_headers):
+                        row_list.append("")
+                    if len(row_list) > len(invalid_headers):
+                        row_list = row_list[:len(invalid_headers)]
+                    formatted_invalid.append(row_list)
+                
+                writer.writerows(formatted_invalid)
             
             messagebox.showinfo(
                 "Exportación completada",
@@ -2571,6 +2813,8 @@ class CSVManagerApp:
         
         # Configurar el color verde para los nuevos contactos
         self.clients_tree.tag_configure('new_contact', background='#c8ffb3')
+        # Configurar el color verde para las celdas modificadas
+        self.clients_tree.tag_configure('modified_cell', background='#a5e88f')
     
     def setup_commercial_treeview(self):
         """Configura el treeview para contactos comerciales."""
@@ -2624,6 +2868,8 @@ class CSVManagerApp:
         
         # Configurar el color verde para los nuevos contactos
         self.commercial_tree.tag_configure('new_contact', background='#c8ffb3')
+        # Configurar el color verde para las celdas modificadas
+        self.commercial_tree.tag_configure('modified_cell', background='#a5e88f')
     
     def setup_invalid_treeview(self):
         """Configura el treeview para emails no válidos."""
@@ -2690,7 +2936,15 @@ class CSVManagerApp:
         
         # Mostrar clientes regulares
         for client in regular_clients:
-            self.clients_tree.insert("", tk.END, values=client)
+            email = client[1]  # El email está en la posición 1
+            
+            # Comprobar si el cliente está en la lista de contactos modificados
+            if email in self.modified_contacts:
+                # Si está modificado, insertar con la etiqueta de modificado
+                item_id = self.clients_tree.insert("", tk.END, values=client, tags=('modified_cell',))
+            else:
+                # Si no está modificado, insertar normalmente
+                item_id = self.clients_tree.insert("", tk.END, values=client)
         
         # Mostrar clientes nuevos al final con tag especial
         for client in new_clients:
@@ -2715,7 +2969,15 @@ class CSVManagerApp:
         
         # Mostrar contactos comerciales regulares
         for commercial in regular_commercials:
-            self.commercial_tree.insert("", tk.END, values=commercial)
+            email = commercial[1]  # El email está en la posición 1
+            
+            # Comprobar si el contacto comercial está en la lista de contactos modificados
+            if email in self.modified_contacts:
+                # Si está modificado, insertar con la etiqueta de modificado
+                item_id = self.commercial_tree.insert("", tk.END, values=commercial, tags=('modified_cell',))
+            else:
+                # Si no está modificado, insertar normalmente
+                item_id = self.commercial_tree.insert("", tk.END, values=commercial)
         
         # Mostrar contactos comerciales nuevos al final con tag especial
         for commercial in new_commercials:
@@ -2974,7 +3236,12 @@ class CSVManagerApp:
             
             with open(filepath, 'r', encoding=encoding) as csv_file:
                 csv_reader = csv.reader(csv_file, delimiter=';')
-                next(csv_reader, None)  # Saltar encabezados
+                # Eliminar la siguiente línea para no saltar encabezados
+                # next(csv_reader, None)  # Saltar encabezados
+                
+                # Contadores para depuración
+                skipped_insufficient_columns = 0
+                skipped_empty_email = 0
                 
                 for row in csv_reader:
                     # Verificar que la fila tenga suficientes columnas
@@ -2986,11 +3253,19 @@ class CSVManagerApp:
                                        city_index if city_index > 0 else 0)
                     
                     if len(row) <= max_required_idx:
+                        skipped_insufficient_columns += 1
+                        if self.db_manager.debug_mode:
+                            print(f"DEBUG: Saltando fila con columnas insuficientes. Tiene {len(row)} columnas, se necesitan {max_required_idx+1}.")
+                            if len(row) > 0:
+                                print(f"Contenido de la fila: {row}")
                         continue  # Saltar filas que no tienen suficientes columnas
                     
                     email = row[email_index].strip().lower() if email_index < len(row) else ""
                     
                     if not email:
+                        skipped_empty_email += 1
+                        if self.db_manager.debug_mode:
+                            print(f"DEBUG: Saltando fila sin email. Contenido: {row}")
                         continue  # Saltar filas sin email
                     
                     # Guardar los datos de esta fila organizados por email
@@ -3055,6 +3330,27 @@ class CSVManagerApp:
                                         "email": email,
                                         "changes": result["changes"]
                                     })
+                                    
+                                    # Guardar los campos modificados para colorearlos después
+                                    modified_fields = []
+                                    for change in result["changes"]:
+                                        parts = change.split(": ")
+                                        if len(parts) >= 2:
+                                            field_name = parts[0]
+                                            # Mapear los nombres de campo en español a los nombres de columna en inglés
+                                            field_mapping = {
+                                                "nombre": "name",
+                                                "código cliente": "client_code",
+                                                "dirección": "address",
+                                                "código postal": "postal_code",
+                                                "población": "town",
+                                                "ciudad": "city"
+                                            }
+                                            if field_name in field_mapping:
+                                                modified_fields.append(field_mapping[field_name])
+                                    
+                                    # Guardar en el diccionario de contactos modificados
+                                    self.modified_contacts[email] = modified_fields
                                 else:
                                     # Si el usuario rechaza, revertir los cambios en la base de datos
                                     cursor = self.db_manager.conn.cursor()
@@ -3103,89 +3399,90 @@ class CSVManagerApp:
                             pass
                         elif "updated" in result:
                             if result["updated"] and result["changes"]:
-                                # Preguntar al usuario si desea aplicar los cambios
-                                changes_message = f"Se han detectado cambios en el contacto comercial {name} <{email}>:\n\n"
+                                # Filtrar solo los cambios reales en los datos
+                                real_changes = []
                                 for change in result["changes"]:
-                                    changes_message += f"• {change}\n"
-                                changes_message += "\n¿Desea aplicar estos cambios?"
+                                    # Ignorar cambios de categoría
+                                    if not any(cat in change.lower() for cat in ["categoría", "category"]):
+                                        real_changes.append(change)
                                 
-                                # Añadir opción para activar depuración si hay muchos cambios
-                                if len(result["changes"]) > 3:
-                                    changes_message += "\n\nNota: Si cree que estos cambios no son correctos, puede activar el modo de depuración en la parte inferior derecha de la ventana para obtener más información."
+                                # Verificar si el contacto acaba de ser reclasificado recientemente
+                                cursor = self.db_manager.conn.cursor()
                                 
-                                if messagebox.askyesno("Cambios detectados", changes_message):
-                                    # Si el usuario acepta, actualizar el contador
-                                    updated_clients += 1
-                                    # Guardar los detalles de los cambios
-                                    clients_with_changes.append({
-                                        "name": name,
-                                        "email": email,
-                                        "changes": result["changes"]
-                                    })
+                                # Solo considerar como "recién movido" si fue añadido hace menos de 10 minutos
+                                # Lo que generalmente indica que fue parte de la misma operación
+                                cursor.execute("SELECT imported_date FROM commercial_contacts WHERE email = ?", (email,))
+                                commercial_date = cursor.fetchone()
+                                contact_just_moved = False
+                                
+                                if commercial_date:
+                                    last_date = commercial_date[0]
+                                    now = datetime.now()
+                                    
+                                    if isinstance(last_date, str):
+                                        try:
+                                            last_date = datetime.strptime(last_date, "%Y-%m-%d %H:%M:%S")
+                                            # Si fue agregado en los últimos 10 minutos, probablemente es 
+                                            # parte de la misma operación de reclasificación
+                                            if (now - last_date).total_seconds() < 600:  # 10 minutos
+                                                # Buscar si existía antes en otra tabla (cliente)
+                                                cursor.execute("SELECT COUNT(*) FROM clients WHERE email = ?", (email,))
+                                                client_count = cursor.fetchone()[0]
+                                                if client_count > 0:
+                                                    # Si existe en ambas tablas, es una reclasificación en progreso
+                                                    contact_just_moved = True
+                                        except ValueError:
+                                            pass
+                                
+                                # Si hay cambios importantes en el contacto (no solo cambio de categoría)
+                                if real_changes:
+                                    # Preguntar al usuario si desea aplicar los cambios
+                                    changes_message = f"Se han detectado cambios en el contacto comercial {name} <{email}>:\n\n"
+                                    for change in real_changes:
+                                        changes_message += f"• {change}\n"
+                                    changes_message += "\n¿Desea aplicar estos cambios?"
+                                    
+                                    # Añadir opción para activar depuración si hay muchos cambios
+                                    if len(real_changes) > 3:
+                                        changes_message += "\n\nNota: Si cree que estos cambios no son correctos, puede activar el modo de depuración en la parte inferior derecha de la ventana para obtener más información."
+                                    
+                                    if messagebox.askyesno("Cambios detectados", changes_message):
+                                        # Si el usuario acepta, actualizar el contador
+                                        updated_clients += 1
+                                        # Guardar los detalles de los cambios
+                                        clients_with_changes.append({
+                                            "name": name,
+                                            "email": email,
+                                            "changes": real_changes
+                                        })
+                                        
+                                        # Guardar los campos modificados para colorearlos después
+                                        modified_fields = []
+                                        for change in real_changes:
+                                            parts = change.split(": ")
+                                            if len(parts) >= 2:
+                                                field_name = parts[0]
+                                                # Mapear los nombres de campo en español a los nombres de columna en inglés
+                                                field_mapping = {
+                                                    "nombre": "name",
+                                                    "empresa": "company",
+                                                    "código cliente": "client_code",
+                                                    "dirección": "address",
+                                                    "código postal": "postal_code",
+                                                    "población": "town",
+                                                    "ciudad": "city",
+                                                    "información adicional": "additional_info"
+                                                }
+                                                if field_name in field_mapping:
+                                                    modified_fields.append(field_mapping[field_name])
+                                        
+                                        # Guardar en el diccionario de contactos modificados
+                                        self.modified_contacts[email] = modified_fields
                                 else:
-                                    # Si el usuario rechaza, revertir los cambios en la base de datos
-                                    # Obtener los valores originales
-                                    cursor = self.db_manager.conn.cursor()
-                                    cursor.execute("SELECT id FROM commercial_contacts WHERE email = ?", (email,))
-                                    contact_id = cursor.fetchone()[0]
-                                    
-                                    # Buscar los valores originales de cada campo que cambió
-                                    originals = {}
-                                    for change in result["changes"]:
-                                        parts = change.split(": ")
-                                        if len(parts) >= 2:
-                                            field = parts[0]
-                                            values_part = parts[1]
-                                            value_parts = values_part.split(" -> ")
-                                            if len(value_parts) >= 1:
-                                                original = value_parts[0].strip("'")
-                                                originals[field] = original
-                                    
-                                    # Obtener valores actuales para campos que no cambiaron
-                                    cursor.execute(
-                                        "SELECT name, company, client_code, address, postal_code, town, city, additional_info FROM commercial_contacts WHERE id = ?", 
-                                        (contact_id,)
-                                    )
-                                    current = cursor.fetchone()
-                                    
-                                    # Preparar los valores para la actualización
-                                    update_values = {
-                                        "nombre": current[0],
-                                        "empresa": current[1],
-                                        "código cliente": current[2],
-                                        "dirección": current[3],
-                                        "código postal": current[4],
-                                        "población": current[5],
-                                        "ciudad": current[6],
-                                        "información adicional": current[7]
-                                    }
-                                    
-                                    # Sobreescribir con los valores originales para campos que cambiaron
-                                    for field, value in originals.items():
-                                        update_values[field] = value
-                                    
-                                    # Actualizar con los valores originales
-                                    cursor.execute(
-                                        """UPDATE commercial_contacts SET 
-                                           name = ?, company = ?, client_code = ?, address = ?, 
-                                           postal_code = ?, town = ?, city = ?, additional_info = ? 
-                                           WHERE id = ?""",
-                                        (
-                                            update_values["nombre"],
-                                            update_values["empresa"],
-                                            update_values["código cliente"],
-                                            update_values["dirección"],
-                                            update_values["código postal"],
-                                            update_values["población"],
-                                            update_values["ciudad"],
-                                            update_values["información adicional"],
-                                            contact_id
-                                        )
-                                    )
-                                    self.db_manager.conn.commit()
+                                    # No hay cambios reales en los datos
                                     unchanged_clients += 1
                             else:
-                                # Si no hay cambios, incrementar el contador de sin cambios
+                                # No hay cambios según la BD
                                 unchanged_clients += 1
                         elif "error" in result:
                             print(f"Error al procesar contacto comercial {name}, {email}: {result['error']}")
@@ -3230,6 +3527,16 @@ class CSVManagerApp:
                               f"Se han actualizado {updated_clients} clientes existentes.\n"\
                               f"Se han omitido {unchanged_clients} clientes sin cambios.\n"\
                               f"Se han omitido {duplicate_contacts} contactos duplicados."
+            
+            # Añadir información de depuración sobre filas saltadas
+            if self.db_manager.debug_mode:
+                total_rows = skipped_insufficient_columns + skipped_empty_email + len(csv_data)
+                detailed_message += f"\n\nInformación de depuración:\n"\
+                                   f"- Total de filas en CSV: {total_rows}\n"\
+                                   f"- Filas procesadas correctamente: {len(csv_data)}\n"\
+                                   f"- Filas saltadas por columnas insuficientes: {skipped_insufficient_columns}\n"\
+                                   f"- Filas saltadas por email vacío: {skipped_empty_email}\n"\
+                                   f"- Duplicados (mismo email): {total_rows - skipped_insufficient_columns - skipped_empty_email - len(csv_data)}"
             
             # Si hay clientes actualizados, mostrar los detalles de los cambios
             if updated_clients > 0 and clients_with_changes:
@@ -3287,10 +3594,6 @@ class CSVManagerApp:
                         
                         # Centrar la ventana relativa a la ventana principal
                         self.center_window(details_window)
-                        
-                    else:
-                        # Si no quiere ver los detalles, mostrar solo el resumen
-                        messagebox.showinfo("Importación Completada", detailed_message)
                 else:
                     # Si el mensaje no es muy largo, mostrar todo junto
                     messagebox.showinfo(
@@ -3300,6 +3603,14 @@ class CSVManagerApp:
             else:
                 # Si no hay cambios, mostrar solo el mensaje básico
                 messagebox.showinfo("Importación Completada", detailed_message)
+            
+            # Limpiar variables que controlan la importación para próximos usos
+            self.skip_all_duplicates = False
+            
+            # No limpiamos self.new_contacts para que se muestren resaltados hasta la próxima importación
+            # En cambio, limpiamos los contactos modificados ya que esos sí tienen el efecto permanente en la BD
+            # y ya han sido vistos en el informe que se acaba de mostrar
+            self.modified_contacts = {}
         
         except Exception as e:
             messagebox.showerror("Error", f"Error al importar el archivo: {str(e)}")
@@ -3699,15 +4010,35 @@ class CSVManagerApp:
             if selected_items:
                 for item in selected_items:
                     values = self.clients_tree.item(item, 'values')
-                    contacts_to_reclassify.append({"name": values[0], "email": values[1]})
+                    # Capturar todos los campos del cliente
+                    contacts_to_reclassify.append({
+                        "name": values[0],
+                        "email": values[1],
+                        "client_code": values[3] if len(values) > 3 else "",
+                        "address": values[4] if len(values) > 4 else "",
+                        "postal_code": values[5] if len(values) > 5 else "",
+                        "town": values[6] if len(values) > 6 else "",
+                        "city": values[7] if len(values) > 7 else "",
+                        "additional_info": values[8] if len(values) > 8 else "",
+                    })
                 contact_type = "cliente"
         elif current_tab == 1:  # Pestaña de contactos comerciales
             selected_items = self.commercial_tree.selection()
             if selected_items:
                 for item in selected_items:
                     values = self.commercial_tree.item(item, 'values')
-                    # Para contactos comerciales, también guardamos la empresa
-                    contacts_to_reclassify.append({"name": values[0], "email": values[1], "company": values[2]})
+                    # Capturar todos los campos del contacto comercial
+                    contacts_to_reclassify.append({
+                        "name": values[0],
+                        "email": values[1],
+                        "company": values[2] if len(values) > 2 else "",
+                        "client_code": values[4] if len(values) > 4 else "",
+                        "address": values[5] if len(values) > 5 else "",
+                        "postal_code": values[6] if len(values) > 6 else "",
+                        "town": values[7] if len(values) > 7 else "",
+                        "city": values[8] if len(values) > 8 else "",
+                        "additional_info": values[9] if len(values) > 9 else "",
+                    })
                 contact_type = "contacto comercial"
         elif current_tab == 2:  # Pestaña de emails no válidos
             selected_items = self.invalid_tree.selection()
@@ -3813,35 +4144,326 @@ class CSVManagerApp:
     def _process_reclassification(self, current_type, contact, new_category_index, provided_reason=None):
         """Procesa la reclasificación de un contacto a una nueva categoría."""
         try:
+            # Recuperar todos los campos del contacto
             name = contact.get("name", "")
             email = contact.get("email", "")
             company = contact.get("company", "")
+            client_code = contact.get("client_code", "")
+            address = contact.get("address", "")
+            postal_code = contact.get("postal_code", "")
+            town = contact.get("town", "")
+            city = contact.get("city", "")
+            additional_info = contact.get("additional_info", "")
+            
+            # Verificar que los valores no sean None
+            name = str(name) if name is not None else ""
+            email = str(email) if email is not None else ""
+            company = str(company) if company is not None else ""
+            client_code = str(client_code) if client_code is not None else ""
+            address = str(address) if address is not None else ""
+            postal_code = str(postal_code) if postal_code is not None else ""
+            town = str(town) if town is not None else ""
+            city = str(city) if city is not None else ""
+            additional_info = str(additional_info) if additional_info is not None else ""
+            
+            # Depuración
+            print(f"DEBUG - Reclasificando contacto: {email}")
+            print(f"DEBUG - Tipo original: {current_type}")
+            print(f"DEBUG - Nuevo tipo: {new_category_index}")
+            print(f"DEBUG - Datos: nombre={name}, email={email}, empresa={company}")
+            print(f"DEBUG - Datos adicionales: código={client_code}, dirección={address}, CP={postal_code}")
+            print(f"DEBUG - Más datos: población={town}, ciudad={city}, info adicional={additional_info}")
+            
+            # Crear una conexión a la base de datos si no existe
+            if not self.db_manager.conn:
+                self.db_manager.create_database()
             
             cursor = self.db_manager.conn.cursor()
             
             # Eliminar de la categoría actual
-            if current_type == "cliente":
-                cursor.execute("DELETE FROM clients WHERE email=?", (email,))
-            elif current_type == "contacto comercial":
-                cursor.execute("DELETE FROM commercial_contacts WHERE email=?", (email,))
-            elif current_type == "email no válido":
-                cursor.execute("DELETE FROM invalid_emails WHERE email=?", (email,))
+            try:
+                if current_type == "cliente":
+                    cursor.execute("DELETE FROM clients WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de clientes: {email}")
+                elif current_type == "contacto comercial":
+                    cursor.execute("DELETE FROM commercial_contacts WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de contactos comerciales: {email}")
+                elif current_type == "email no válido":
+                    cursor.execute("DELETE FROM invalid_emails WHERE email=?", (email,))
+                    print(f"DEBUG - Eliminado de emails no válidos: {email}")
+            except Exception as delete_error:
+                print(f"ERROR en eliminación: {str(delete_error)}")
             
             # Insertar en la nueva categoría
             if new_category_index == 0:  # Cliente
-                self.db_manager.add_client(name, email)
+                try:
+                    result = self.db_manager.add_client(
+                        name=name, 
+                        email=email, 
+                        client_code=client_code, 
+                        address=address, 
+                        postal_code=postal_code, 
+                        town=town, 
+                        city=city,
+                        additional_info=additional_info
+                    )
+                    print(f"DEBUG - Resultado add_client: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_client: {str(add_error)}")
+                    raise
             elif new_category_index == 1:  # Contacto comercial
-                self.db_manager.add_commercial_contact(name, email, company)
+                try:
+                    result = self.db_manager.add_commercial_contact(
+                        name=name, 
+                        email=email, 
+                        company=company, 
+                        client_code=client_code, 
+                        address=address, 
+                        postal_code=postal_code, 
+                        town=town, 
+                        city=city, 
+                        additional_info=additional_info
+                    )
+                    print(f"DEBUG - Resultado add_commercial_contact: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_commercial_contact: {str(add_error)}")
+                    raise
             elif new_category_index == 2:  # Email no válido
                 reason = provided_reason or "Marcado manualmente como inválido"
-                self.db_manager.add_invalid_email(email, name, reason)
+                try:
+                    result = self.db_manager.add_invalid_email(email, name, reason)
+                    print(f"DEBUG - Resultado add_invalid_email: {result}")
+                except Exception as add_error:
+                    print(f"ERROR en add_invalid_email: {str(add_error)}")
+                    raise
                 
-            self.db_manager.conn.commit()
+            # Confirmar los cambios
+            try:
+                self.db_manager.conn.commit()
+                print(f"DEBUG - Cambios confirmados en la base de datos")
+            except Exception as commit_error:
+                print(f"ERROR en commit: {str(commit_error)}")
+                raise
+                
             return True
             
         except Exception as e:
-            print(f"Error al reclasificar el contacto {email}: {str(e)}")
+            print(f"ERROR CRÍTICO al reclasificar el contacto {email}: {str(e)}")
+            traceback.print_exc()  # Esto imprimirá el traceback completo
             return False
+    
+    def center_window(self, window):
+        """Centra una ventana en la pantalla."""
+        window.update_idletasks()
+        width = window.winfo_width()
+        height = window.winfo_height()
+        x = (window.winfo_screenwidth() // 2) - (width // 2)
+        y = (window.winfo_screenheight() // 2) - (height // 2)
+        window.geometry(f'{width}x{height}+{x}+{y}')
+    
+    def export_current_category(self):
+        """Exporta solo los datos de la categoría actualmente seleccionada."""
+        current_tab = self.notebook.index(self.notebook.select())
+        
+        if current_tab == 0:  # Clientes
+            self._export_category("clientes", self.db_manager.get_all_clients(),
+                                 ["Nombre", "Email", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"])
+        elif current_tab == 1:  # Comerciales
+            self._export_category("contactos_comerciales", self.db_manager.get_all_commercial_contacts(),
+                                 ["Nombre", "Email", "Empresa", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"])
+        elif current_tab == 2:  # No válidos
+            self._export_category("emails_no_validos", self.db_manager.get_all_invalid_emails(),
+                                 ["Email", "Nombre", "Fecha Importación", "Motivo"])
+    
+    def _export_category(self, filename_prefix, data, headers):
+        """Exporta una categoría específica a un archivo CSV."""
+        filepath = filedialog.asksaveasfilename(
+            title=f"Guardar {filename_prefix}",
+            defaultextension=".csv",
+            filetypes=[("Archivos CSV", "*.csv"), ("Todos los archivos", "*.*")],
+            initialfile=f"{filename_prefix}.csv"
+        )
+        
+        if not filepath:
+            return
+        
+        try:
+            with open(filepath, 'w', newline='', encoding='utf-8-sig') as f:
+                # Usar punto y coma como delimitador para mejor compatibilidad con Excel español
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(headers)
+                
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_data = []
+                for row in data:
+                    # Si la fila tiene menos columnas que los encabezados, añadir columnas vacías
+                    row_list = list(row)
+                    while len(row_list) < len(headers):
+                        row_list.append("")
+                    # Si la fila tiene más columnas que los encabezados, truncar
+                    if len(row_list) > len(headers):
+                        row_list = row_list[:len(headers)]
+                    formatted_data.append(row_list)
+                
+                writer.writerows(formatted_data)
+            
+            messagebox.showinfo(
+                "Exportación completada",
+                f"Los datos han sido exportados exitosamente a:\n{filepath}"
+            )
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al exportar los datos: {str(e)}")
+    
+    def export_all_data(self):
+        """Exporta todos los datos a archivos CSV."""
+        export_dir = filedialog.askdirectory(title="Seleccionar carpeta para exportación de todos los datos")
+        
+        if not export_dir:
+            return
+        
+        try:
+            # Definir headers para cada categoría
+            client_headers = ["Nombre", "Email", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"]
+            commercial_headers = ["Nombre", "Email", "Empresa", "Fecha Importación", "Código de Cliente", "Dirección", "Código Postal", "Población", "Ciudad", "Información Adicional"]
+            invalid_headers = ["Email", "Nombre", "Fecha Importación", "Motivo"]
+            
+            # Exportar clientes
+            clients_path = os.path.join(export_dir, "clientes.csv")
+            with open(clients_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(client_headers)
+                
+                clients = self.db_manager.get_all_clients()
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_clients = []
+                for row in clients:
+                    row_list = list(row)
+                    while len(row_list) < len(client_headers):
+                        row_list.append("")
+                    if len(row_list) > len(client_headers):
+                        row_list = row_list[:len(client_headers)]
+                    formatted_clients.append(row_list)
+                
+                writer.writerows(formatted_clients)
+            
+            # Exportar contactos comerciales
+            commercial_path = os.path.join(export_dir, "contactos_comerciales.csv")
+            with open(commercial_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(commercial_headers)
+                
+                commercial_contacts = self.db_manager.get_all_commercial_contacts()
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_commercial = []
+                for row in commercial_contacts:
+                    row_list = list(row)
+                    while len(row_list) < len(commercial_headers):
+                        row_list.append("")
+                    if len(row_list) > len(commercial_headers):
+                        row_list = row_list[:len(commercial_headers)]
+                    formatted_commercial.append(row_list)
+                
+                writer.writerows(formatted_commercial)
+            
+            # Exportar emails no válidos
+            invalid_path = os.path.join(export_dir, "emails_no_validos.csv")
+            with open(invalid_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(invalid_headers)
+                
+                invalid_emails = self.db_manager.get_all_invalid_emails()
+                # Asegurar que cada fila tiene el número correcto de columnas
+                formatted_invalid = []
+                for row in invalid_emails:
+                    row_list = list(row)
+                    while len(row_list) < len(invalid_headers):
+                        row_list.append("")
+                    if len(row_list) > len(invalid_headers):
+                        row_list = row_list[:len(invalid_headers)]
+                    formatted_invalid.append(row_list)
+                
+                writer.writerows(formatted_invalid)
+            
+            messagebox.showinfo(
+                "Exportación completada",
+                f"Los datos han sido exportados exitosamente a:\n"
+                f"- {clients_path}\n"
+                f"- {commercial_path}\n"
+                f"- {invalid_path}"
+            )
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error al exportar los datos: {str(e)}")
+    
+    def delete_contacts(self):
+        """Elimina los contactos seleccionados de la categoría actual."""
+        # Determinar qué pestaña está activa
+        current_tab = self.notebook.index(self.notebook.select())
+        selected_items = []
+        contact_type = ""
+        contacts_to_delete = []
+        
+        # Obtener los contactos seleccionados de la pestaña activa
+        if current_tab == 0:  # Pestaña de clientes
+            selected_items = self.clients_tree.selection()
+            if selected_items:
+                for item in selected_items:
+                    values = self.clients_tree.item(item, 'values')
+                    contacts_to_delete.append({"name": values[0], "email": values[1]})
+                contact_type = "cliente"
+        elif current_tab == 1:  # Pestaña de contactos comerciales
+            selected_items = self.commercial_tree.selection()
+            if selected_items:
+                for item in selected_items:
+                    values = self.commercial_tree.item(item, 'values')
+                    contacts_to_delete.append({"name": values[0], "email": values[1]})
+                contact_type = "contacto comercial"
+        elif current_tab == 2:  # Pestaña de emails no válidos
+            selected_items = self.invalid_tree.selection()
+            if selected_items:
+                for item in selected_items:
+                    values = self.invalid_tree.item(item, 'values')
+                    contacts_to_delete.append({"email": values[0], "name": values[1]})
+                contact_type = "email no válido"
+        
+        if not selected_items:
+            messagebox.showinfo("Información", "Por favor, seleccione al menos un contacto para eliminar.")
+            return
+        
+        # Pedir confirmación antes de eliminar
+        num_selected = len(selected_items)
+        plural = "s" if num_selected > 1 else ""
+        if not messagebox.askyesno("Confirmar eliminación", 
+                                  f"¿Está seguro que desea eliminar {num_selected} {contact_type}{plural} seleccionado{plural}?"):
+            return
+        
+        # Procesar la eliminación de cada contacto
+        deleted_count = 0
+        for contact in contacts_to_delete:
+            email = contact.get("email", "")
+            
+            if current_tab == 0:  # Cliente
+                if self.db_manager.delete_client(email):
+                    deleted_count += 1
+            elif current_tab == 1:  # Contacto comercial
+                if self.db_manager.delete_commercial_contact(email):
+                    deleted_count += 1
+            elif current_tab == 2:  # Email no válido
+                if self.db_manager.delete_invalid_email(email):
+                    deleted_count += 1
+        
+        # Actualizar la vista después de eliminar
+        self.update_lists()
+        
+        # Mostrar mensaje de éxito
+        messagebox.showinfo("Eliminación completada", 
+                          f"Se han eliminado {deleted_count} contacto(s) correctamente.")
+    
+    def on_closing(self):
+        """Maneja el cierre de la aplicación."""
+        self.db_manager.close_connection()
+        self.root.destroy()
 
 # Ejecutar la aplicación
 if __name__ == "__main__":
